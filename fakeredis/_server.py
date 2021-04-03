@@ -19,6 +19,9 @@ import redis
 
 from ._zset import ZSet
 
+# !!!SPLICE
+from django.splice.splicetypes import SpliceMixin, SpliceBytes, SpliceFloat, SpliceStr, SpliceInt
+
 
 LOGGER = logging.getLogger('fakeredis')
 REDIS_LOG_LEVELS = {
@@ -362,10 +365,15 @@ class Int:
     def valid(cls, value):
         return cls.MIN_VALUE <= value <= cls.MAX_VALUE
 
+    # !!!SPLICE: int should be SpliceInt.
+    # FIXME: This can be done automatically by shadowing int using SpliceInt
     @classmethod
     def decode(cls, value):
         try:
-            out = int(value)
+            # out = int(value)
+            # !!!SPLICE: Before casting, check if value is of SpliceMixin type
+            assert isinstance(value, SpliceMixin)
+            out = SpliceInt(value)
             if not cls.valid(out) or str(out).encode() != value:
                 raise ValueError
         except ValueError:
@@ -419,6 +427,8 @@ class Float:
 
     DECODE_ERROR = INVALID_FLOAT_MSG
 
+    # !!!SPLICE: float should be SpliceFloat.
+    # FIXME: This can be done automatically by shadowing float using SpliceFloat
     @classmethod
     def decode(cls, value,
                allow_leading_whitespace=False,
@@ -436,7 +446,10 @@ class Float:
                 raise ValueError
             if value[-1:].isspace():
                 raise ValueError
-            out = float(value)
+            # out = float(value)
+            # !!!SPLICE: Before casting, check if value is of SpliceMixin type
+            assert isinstance(value, SpliceMixin)
+            out = SpliceFloat(value)
             if math.isnan(out):
                 raise ValueError
             if not allow_erange:
@@ -449,13 +462,18 @@ class Float:
         except ValueError:
             raise SimpleError(cls.DECODE_ERROR)
 
+    # !!!SPLICE: str should be SpliceStr.
+    # FIXME: This can be done automatically by shadowing str using SpliceStr
     @classmethod
     def encode(cls, value, humanfriendly):
         if math.isinf(value):
-            return str(value).encode()
+            # !!!SPLICE: Before casting, check if value is of SpliceMixin type
+            # return str(value).encode()
+            return SpliceStr(value).encode()
         elif humanfriendly:
             # Algorithm from ld2string in redis
             out = '{:.17f}'.format(value)
+            # FIXME: We will probably lose taint here! Be aware!
             out = re.sub(r'(?:\.)?0+$', '', out)
             return out.encode()
         else:
@@ -587,7 +605,11 @@ class Signature:
             if isinstance(type_, Key):
                 if type_.missing_return is not Key.UNSPECIFIED and arg not in db:
                     return (type_.missing_return,)
-            elif type_ != bytes:
+            # !!!SPLICE: bytes should be SpliceBytes (although no effect on the computation
+            #            because decode() will return SpliceBytes anyways).
+            # FIXME: This can be done automatically by shadowing bytes using SpliceBytes
+            # elif type_ != bytes:
+            elif type_ != SpliceBytes:
                 args[i] = type_.decode(args[i])
 
         # Second pass: read keys and check their types
@@ -708,7 +730,14 @@ class FakeSocket:
         It is fed pieces of redis protocol data (via `send`) and calls
         `_process_command` whenever it has a complete one.
         """
-        buf = b''
+        # FIXME: Artificially introduce taints here to ensure taint propagates correctly
+        #  afterwards. Python Redis should be instrumented to properly introduce taints.
+        # from django.splice.identity import empty_taint
+        # faketaint = empty_taint()
+        # faketaint[1] = True
+        # !!!SPLICE: bytes literal should be SpliceBytes
+        # buf = b''
+        buf = SpliceBytes(b'')
         while True:
             while self._paused or b'\n' not in buf:
                 buf += yield
@@ -1382,7 +1411,10 @@ class FakeSocket:
         key.update(encoded)
         return encoded
 
-    @command((Key(bytes),))
+    # !!!SPLICE: Decorator's bytes should be SpliceBytes.
+    # FIXME: This can be done automatically by shadowing bytes using SpliceBytes
+    # @command((Key(bytes),))
+    @command((Key(SpliceBytes),))
     def get(self, key):
         return key.get(None)
 
@@ -1456,7 +1488,10 @@ class FakeSocket:
             args[i].value = args[i + 1]
         return 1
 
-    @command((Key(), bytes), (bytes,), name='set')
+    # !!!SPLICE: Decorator's bytes should be SpliceBytes.
+    # FIXME: This can be done automatically by shadowing bytes using SpliceBytes
+    # @command((Key(), bytes), (bytes,), name='set')
+    @command((Key(), SpliceBytes), (SpliceBytes,), name='set')
     def set_(self, key, value, *args):
         i = 0
         ex = None
@@ -1733,7 +1768,10 @@ class FakeSocket:
         except IndexError:
             return None
 
-    @command((Key(list), bytes), (bytes,))
+    # !!!SPLICE: Decorator's bytes should be SpliceBytes.
+    # FIXME: This can be done automatically by shadowing bytes using SpliceBytes
+    # @command((Key(list), bytes), (bytes,))
+    @command((Key(list), SpliceBytes), (SpliceBytes,))
     def lpush(self, key, *values):
         for value in values:
             key.value.insert(0, value)
@@ -1811,7 +1849,10 @@ class FakeSocket:
         self.lpush(dst, el)
         return el
 
-    @command((Key(list), bytes), (bytes,))
+    # !!!SPLICE: Decorator's bytes should be SpliceBytes.
+    # FIXME: This can be done automatically by shadowing bytes using SpliceBytes
+    # @command((Key(list), bytes), (bytes,))
+    @command((Key(list), SpliceBytes), (SpliceBytes,))
     def rpush(self, key, *values):
         for value in values:
             key.value.append(value)
@@ -1826,7 +1867,10 @@ class FakeSocket:
 
     # Set commands
 
-    @command((Key(set), bytes), (bytes,))
+    # !!!SPLICE: Decorator's bytes should be SpliceBytes.
+    # FIXME: This can be done automatically by shadowing bytes using SpliceBytes
+    # @command((Key(set), bytes), (bytes,))
+    @command((Key(set), SpliceBytes), (SpliceBytes,))
     def sadd(self, key, *members):
         old_size = len(key.value)
         key.value.update(members)
@@ -2009,7 +2053,10 @@ class FakeSocket:
             out = [item[1] for item in items]
         return out
 
-    @command((Key(ZSet), bytes, bytes), (bytes,))
+    # !!!SPLICE: Decorator's bytes should be SpliceBytes.
+    # FIXME: This can be done automatically by shadowing bytes using SpliceBytes
+    # @command((Key(ZSet), bytes, bytes), (bytes,))
+    @command((Key(ZSet), SpliceBytes, SpliceBytes), (SpliceBytes,))
     def zadd(self, key, *args):
         zset = key.value
 
