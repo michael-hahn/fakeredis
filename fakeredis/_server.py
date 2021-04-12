@@ -21,7 +21,9 @@ from ._zset import ZSet
 
 # !!!SPLICE: Introduce taint-aware Splice data types
 # TODO: Note that this can be done through shadowing
-from django.splice.splicetypes import SpliceMixin, SpliceBytes, SpliceFloat, SpliceStr, SpliceInt
+from django.splice.splicetypes import SpliceFloat, SpliceStr, SpliceInt
+# !!!SPLICE: Introduce a similar Encoder used in redis-py
+from .splice import Encoder
 
 
 LOGGER = logging.getLogger('fakeredis')
@@ -371,8 +373,6 @@ class Int:
         try:
             # !!!SPLICE: Casting into to SpliceInt.
             # out = int(value)
-            # Value should be of SpliceMixin type already
-            assert isinstance(value, SpliceMixin)
             out = SpliceInt(value)
 
             if not cls.valid(out) or str(out).encode() != value:
@@ -448,8 +448,6 @@ class Float:
 
             # !!!SPLICE: Casting float to SpliceFloat
             # out = float(value)
-            # Value should be of SpliceMixin type already
-            assert isinstance(value, SpliceMixin)
             out = SpliceFloat(value)
 
             if math.isnan(out):
@@ -606,10 +604,7 @@ class Signature:
             if isinstance(type_, Key):
                 if type_.missing_return is not Key.UNSPECIFIED and arg not in db:
                     return (type_.missing_return,)
-            # !!!SPLICE: bytes should be SpliceBytes (although probably no effect on the
-            #            computation because decode() will return SpliceBytes anyways).
-            # elif type_ != bytes:
-            elif type_ != SpliceBytes:
+            elif type_ != bytes:
                 args[i] = type_.decode(args[i])
 
         # Second pass: read keys and check their types
@@ -662,6 +657,25 @@ class FakeServer:
         self.psubscribers = defaultdict(weakref.WeakSet)
         self.lastsave = int(time.time())
         self.connected = True
+        # !!!SPLICE: encoder
+        self.encoder = Encoder('utf-8', 'strict', False)
+
+    # !!!SPLICE: compressor and serializer
+    @property
+    def compressor(self):
+        return self._compressor
+
+    @compressor.setter
+    def compressor(self, compressor):
+        self._compressor = compressor
+
+    @property
+    def serializer(self):
+        return self._serializer
+
+    @serializer.setter
+    def serializer(self, serializer):
+        self._serializer = serializer
 
 
 class FakeSocket:
@@ -730,9 +744,7 @@ class FakeSocket:
         It is fed pieces of redis protocol data (via `send`) and calls
         `_process_command` whenever it has a complete one.
         """
-        # !!!SPLICE: bytes literal should be SpliceBytes
-        # buf = b''
-        buf = SpliceBytes(b'')
+        buf = b''
 
         while True:
             while self._paused or b'\n' not in buf:
@@ -1407,9 +1419,7 @@ class FakeSocket:
         key.update(encoded)
         return encoded
 
-    # !!!SPLICE: Decorator's bytes should be SpliceBytes.
-    # @command((Key(bytes),))
-    @command((Key(SpliceBytes),))
+    @command((Key(bytes),))
     def get(self, key):
         return key.get(None)
 
@@ -1483,9 +1493,7 @@ class FakeSocket:
             args[i].value = args[i + 1]
         return 1
 
-    # !!!SPLICE: Decorator's bytes should be SpliceBytes.
-    # @command((Key(), bytes), (bytes,), name='set')
-    @command((Key(), SpliceBytes), (SpliceBytes,), name='set')
+    @command((Key(), bytes), (bytes,), name='set')
     def set_(self, key, value, *args):
         i = 0
         ex = None
@@ -1762,9 +1770,7 @@ class FakeSocket:
         except IndexError:
             return None
 
-    # !!!SPLICE: Decorator's bytes should be SpliceBytes.
-    # @command((Key(list), bytes), (bytes,))
-    @command((Key(list), SpliceBytes), (SpliceBytes,))
+    @command((Key(list), bytes), (bytes,))
     def lpush(self, key, *values):
         for value in values:
             key.value.insert(0, value)
@@ -1842,9 +1848,7 @@ class FakeSocket:
         self.lpush(dst, el)
         return el
 
-    # !!!SPLICE: Decorator's bytes should be SpliceBytes.
-    # @command((Key(list), bytes), (bytes,))
-    @command((Key(list), SpliceBytes), (SpliceBytes,))
+    @command((Key(list), bytes), (bytes,))
     def rpush(self, key, *values):
         for value in values:
             key.value.append(value)
@@ -1859,9 +1863,7 @@ class FakeSocket:
 
     # Set commands
 
-    # !!!SPLICE: Decorator's bytes should be SpliceBytes.
-    # @command((Key(set), bytes), (bytes,))
-    @command((Key(set), SpliceBytes), (SpliceBytes,))
+    @command((Key(set), bytes), (bytes,))
     def sadd(self, key, *members):
         old_size = len(key.value)
         key.value.update(members)
@@ -2034,19 +2036,22 @@ class FakeSocket:
         return out
 
     @staticmethod
-    def _apply_withscores(items, withscores):
+    def _apply_withscores(items, withscores, server):
         if withscores:
             out = []
             for item in items:
                 out.append(item[1])
-                out.append(Float.encode(item[0], False))
+                # !!!SPLICE: We must encode score using a serializer and
+                #            a compressor to preserve score taints.
+                # out.append(Float.encode(item[0], False))
+                score = server.serializer.dumps(item[0])
+                score = server.compressor.compress(score)
+                out.append(score)
         else:
             out = [item[1] for item in items]
         return out
 
-    # !!!SPLICE: Decorator's bytes should be SpliceBytes.
-    # @command((Key(ZSet), bytes, bytes), (bytes,))
-    @command((Key(ZSet), SpliceBytes, SpliceBytes), (SpliceBytes,))
+    @command((Key(ZSet), bytes, bytes), (bytes,))
     def zadd(self, key, *args):
         zset = key.value
 
@@ -2082,10 +2087,24 @@ class FakeSocket:
         if incr and len(elements) != 2:
             raise SimpleError(ZADD_INCR_LEN_ERROR_MSG)
         # Parse all scores first, before updating
-        items = [
-            (Float.decode(elements[j]), elements[j + 1])
-            for j in range(0, len(elements), 2)
-        ]
+        # !!!SPLICE: Unlike in the original implementation, elements[j]
+        #            (score) is encoded in django-redis, so we must decode
+        #            it first and then encode it into a byte string again.
+        # items = [
+        #     (Float.decode(elements[j]), elements[j + 1])
+        #     for j in range(0, len(elements), 2)
+        # ]
+        items = []
+        for j in range(0, len(elements), 2):
+            score = elements[j]
+            try:
+                score = self._server.compressor.decompress(score)
+            except Exception:
+                # Handle little values, chosen to be not compressed
+                pass
+            score = self._server.serializer.loads(score)
+            score = self._server.encoder.encode(score)
+            items.append((Float.decode(score), elements[j + 1]))
         old_len = len(zset)
         changed_items = 0
 
@@ -2145,7 +2164,8 @@ class FakeSocket:
         if reverse:
             start, stop = len(zset) - stop, len(zset) - start
         items = zset.islice_score(start, stop, reverse)
-        items = self._apply_withscores(items, bool(args))
+        # !!!SPLICE: _apply_withscores now takes a third server argument
+        items = self._apply_withscores(items, bool(args), self._server)
         return items
 
     @command((Key(ZSet), Int, Int), (bytes,))
@@ -2198,7 +2218,8 @@ class FakeSocket:
         zset = key.value
         items = list(zset.irange_score(min.lower_bound, max.upper_bound, reverse=reverse))
         items = self._limit_items(items, offset, count)
-        items = self._apply_withscores(items, withscores)
+        # !!!SPLICE: _apply_withscores now takes a third server argument
+        items = self._apply_withscores(items, withscores, self._server)
         return items
 
     @command((Key(ZSet), ScoreTest, ScoreTest), (bytes,))
@@ -2759,7 +2780,9 @@ class FakeRedisMixin:
                  ssl=False, ssl_keyfile=None, ssl_certfile=None,
                  ssl_cert_reqs=None, ssl_ca_certs=None,
                  max_connections=None, server=None,
-                 connected=True):
+                 connected=True,
+                 # !!!SPICE: Add compressor and serializer from django-redis
+                 compressor=None, serializer=None):
         if not connection_pool:
             # Adapted from redis-py
             if charset is not None:
@@ -2774,6 +2797,9 @@ class FakeRedisMixin:
             if server is None:
                 server = FakeServer()
                 server.connected = connected
+                # !!!SPLICE: server now needs a compressor and a serializer
+                server.compressor = compressor
+                server.serializer = serializer
             kwargs = {
                 'db': db,
                 'password': password,
