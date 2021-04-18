@@ -21,7 +21,7 @@ from ._zset import ZSet
 
 # !!!SPLICE: Introduce taint-aware Splice data types
 # TODO: Note that this can be done through shadowing
-from django.splice.splicetypes import SpliceFloat, SpliceStr, SpliceInt
+from django.splice.splicetypes import SpliceMixin, SpliceFloat, SpliceStr, SpliceInt
 # !!!SPLICE: Introduce a similar Encoder used in redis-py
 from .splice import Encoder
 
@@ -583,7 +583,8 @@ class Signature:
             if delta < 0 or not self.repeat:
                 raise SimpleError(WRONG_ARGS_MSG.format(self.name))
 
-    def apply(self, args, db):
+    # !!!SPLICE: Add a server parameter to access its compressor and serializer
+    def apply(self, args, db, server):
         """Returns a tuple, which is either:
         - transformed args and a dict of CommandItems; or
         - a single containing a short-circuit return value
@@ -611,6 +612,13 @@ class Signature:
         command_items = []
         for i, (arg, type_) in enumerate(zip(args, types)):
             if isinstance(type_, Key):
+                # !!!SPLICE: Must decode the arg (key)
+                try:
+                    arg = server.compressor.decompress(arg)
+                except Exception:
+                    # Handle little values, chosen to be not compressed
+                    pass
+                arg = server.serializer.loads(arg)
                 item = db.get(arg)
                 default = None
                 if type_.type_ is not None:
@@ -628,9 +636,12 @@ class Signature:
 def valid_response_type(value, nested=False):
     if isinstance(value, NoResponse) and not nested:
         return True
-    if value is not None and not isinstance(value, (bytes, SimpleString, SimpleError,
-                                                    int, list)):
-        return False
+    # !!!SPLICE: Because fakeredis now stores different objects,
+    #            e.g., value might be a Django QuerySet, Splice
+    #            objects, or even str. We skip this checking for now.
+    # if value is not None and not isinstance(value, (bytes, SimpleString, SimpleError,
+    #                                                 int, list)):
+    #     return False
     if isinstance(value, list):
         if any(not valid_response_type(item, True) for item in value):
             return False
@@ -768,7 +779,8 @@ class FakeSocket:
     def _run_command(self, func, sig, args, from_script):
         command_items = {}
         try:
-            ret = sig.apply(args, self._db)
+            # !!!SPLICE: Add a third argument.
+            ret = sig.apply(args, self._db, self._server)
             if len(ret) == 1:
                 result = ret[0]
             else:
@@ -960,6 +972,8 @@ class FakeSocket:
         if pattern is not None or type is not None:
             for val in itertools.islice(data, cursor, result_cursor):
                 compare_val = val[0] if isinstance(val, tuple) else val
+                # !!!SPLICE: match_key and match_type expect bytes
+                compare_val = self._server.encoder.encode(compare_val)
                 if match_key(compare_val) and match_type(compare_val):
                     result_data.append(val)
         else:
@@ -1419,7 +1433,10 @@ class FakeSocket:
         key.update(encoded)
         return encoded
 
-    @command((Key(bytes),))
+    # !!!SPLICE: Since we are storing Splice-aware objects,
+    #            the return type is no longer just 'bytes'.
+    # @command((Key(bytes),))
+    @command((Key(),))
     def get(self, key):
         return key.get(None)
 
@@ -1530,6 +1547,13 @@ class FakeSocket:
             return None
         if xx and not key:
             return None
+        # !!!SPLICE: Decode value
+        try:
+            value = self._server.compressor.decompress(value)
+        except Exception:
+            # Handle little values, chosen to be not compressed
+            pass
+        value = self._server.serializer.loads(value)
         if not keepttl:
             key.value = value
         else:
@@ -2044,9 +2068,9 @@ class FakeSocket:
                 # !!!SPLICE: We must encode score using a serializer and
                 #            a compressor to preserve score taints.
                 # out.append(Float.encode(item[0], False))
-                score = server.serializer.dumps(item[0])
-                score = server.compressor.compress(score)
-                out.append(score)
+                # score = server.serializer.dumps(item[0])
+                # score = server.compressor.compress(score)
+                out.append(item[0])
         else:
             out = [item[1] for item in items]
         return out
@@ -2089,7 +2113,7 @@ class FakeSocket:
         # Parse all scores first, before updating
         # !!!SPLICE: Unlike in the original implementation, elements[j]
         #            (score) is encoded in django-redis, so we must decode
-        #            it first and then encode it into a byte string again.
+        #            it. ZSet saves Splice-aware objects instead of bytes.
         # items = [
         #     (Float.decode(elements[j]), elements[j + 1])
         #     for j in range(0, len(elements), 2)
@@ -2097,14 +2121,22 @@ class FakeSocket:
         items = []
         for j in range(0, len(elements), 2):
             score = elements[j]
+            member = elements[j + 1]
             try:
                 score = self._server.compressor.decompress(score)
             except Exception:
                 # Handle little values, chosen to be not compressed
                 pass
             score = self._server.serializer.loads(score)
-            score = self._server.encoder.encode(score)
-            items.append((Float.decode(score), elements[j + 1]))
+            # We will not encode score again, but save the object directly
+            # score = self._server.encoder.encode(score)
+            try:
+                member = self._server.compressor.decompress(member)
+            except Exception:
+                pass
+            member = self._server.serializer.loads(member)
+            # items.append((Float.decode(score), elements[j + 1]))
+            items.append((score, member))
         old_len = len(zset)
         changed_items = 0
 
