@@ -1,10 +1,16 @@
-import sortedcontainers
+# !!!SPLICE: Use a synthesizable version of SortedList instead
+# import sortedcontainers
+from django.splice.structures.sortedlist import SynthesizableSortedList
+from django.splice.structures.hashtable import SynthesizableDict
 
 
 class ZSet:
     def __init__(self):
-        self._bylex = {}     # Maps value to score
-        self._byscore = sortedcontainers.SortedList()
+        # !!!SPLICE: Use synthesizable versions of data structures
+        # self._bylex = {}     # Maps value to score
+        self._bylex = SynthesizableDict()   # Maps value to score
+        # self._byscore = sortedcontainers.SortedList()
+        self._byscore = SynthesizableSortedList()
 
     def __contains__(self, value):
         return value in self._bylex
