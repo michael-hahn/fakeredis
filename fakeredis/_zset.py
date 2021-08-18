@@ -6,11 +6,14 @@ from django.splice.structures.hashtable import SpliceDict
 
 class ZSet:
     def __init__(self):
-        # !!!SPLICE: Use synthesizable versions of data structures
+        # !!!SPLICE =+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=
+        # Use synthesizable versions of the data structure defined by
+        # Splice so that we can performance deletion via synthesis.
         # self._bylex = {}     # Maps value to score
         self._bylex = SpliceDict()   # Maps value to score
         # self._byscore = sortedcontainers.SortedList()
         self._byscore = SpliceSortedListTuple()
+        # =+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=
 
     def __contains__(self, value):
         return value in self._bylex
@@ -21,9 +24,21 @@ class ZSet:
         if old_score is not None:
             if score == old_score:
                 return False
-            self._byscore.remove((old_score, value))
+            # !!!SPLICE =+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=
+            # FIXME: We remove a list of two elements instead of a tuple,
+            #  because replace.py is not able to handle tuples at the
+            #  moment. Switch back to tuples once the bug is fixed there.
+            # self._byscore.remove((old_score, value))
+            self._byscore.remove([old_score, value])
+            # =+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=
         self._bylex[value] = score
-        self._byscore.add((score, value))
+        # !!!SPLICE =+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=
+        # FIXME: We add a list of two elements instead of a tuple,
+        #  because replace.py is not able to handle tuples at the
+        #  moment. Switch back to tuples once the bug is fixed there.
+        # self._byscore.add((score, value))
+        self._byscore.add([score, value])
+        # =+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=
         return True
 
     def __setitem__(self, value, score):

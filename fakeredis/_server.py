@@ -14,6 +14,11 @@ import pickle
 from collections import defaultdict
 from collections.abc import MutableMapping
 
+# !!!SPLICE
+from django.splice.structures.hashtable import SpliceDict
+from django.splice.structures.avl import SpliceAVLTree
+from django.splice.splice import is_synthesized
+
 import six
 import redis
 
@@ -279,6 +284,11 @@ class CommandItem:
 class Database(MutableMapping):
     def __init__(self, lock, *args, **kwargs):
         self._dict = dict(*args, **kwargs)
+        # !!!SPLICE: We use SpliceDict instead of built-in dict for synthesis.
+        #            However, SpliceDict can only take data types that can be
+        #            converted to Splice types.
+        # self._dict = SpliceDict(*args, **kwargs)
+
         self.time = 0.0
         self._watches = defaultdict(set)      # key to set of connections
         self.condition = threading.Condition(lock)
@@ -326,7 +336,9 @@ class Database(MutableMapping):
 
     def __getitem__(self, key):
         item = self._dict[key]
-        if self.expired(item):
+        # !!!SPLICE: Check if item's value is synthesized as well
+        # if self.expired(item):
+        if self.expired(item) or is_synthesized(item.value):
             del self._dict[key]
             raise KeyError(key)
         return item
@@ -2689,6 +2701,80 @@ class FakeSocket:
                     sock.put_response(msg)
                     receivers += 1
         return receivers
+
+    # !!!SPLICE =+=+=+=+=+=+=+
+    # Splice specific commands
+    # =+=+=+=+=+=+=+=+=+=+=+=+
+    @command((Key(SpliceDict), bytes, bytes), (bytes,))
+    def hadd(self, key, *args):
+        hmap = key.value
+
+        i = 0
+        elements = args[i:]
+        if not elements or len(elements) % 2 != 0:
+            raise SimpleError(SYNTAX_ERROR_MSG)
+        items = []
+        for j in range(0, len(elements), 2):
+            k = elements[j]
+            v = elements[j + 1]
+            try:
+                k = self._server.compressor.decompress(k)
+            except Exception:
+                # Handle little values, chosen to be not compressed
+                pass
+            k = self._server.serializer.loads(k)
+            try:
+                v = self._server.compressor.decompress(v)
+            except Exception:
+                pass
+            v = self._server.serializer.loads(v)
+            items.append((k, v))
+        changed_items = 0
+
+        for item_key, item_val in items:
+            hmap[item_key] = item_val
+            changed_items += 1
+
+        if changed_items:
+            key.updated()
+
+        return len(hmap)
+
+    @command((Key(SpliceAVLTree), bytes, bytes), (bytes,))
+    def tadd(self, key, *args):
+        avl = key.value
+
+        i = 0
+        elements = args[i:]
+        if not elements or len(elements) % 2 != 0:
+            raise SimpleError(SYNTAX_ERROR_MSG)
+        items = []
+        for j in range(0, len(elements), 2):
+            k = elements[j]
+            v = elements[j + 1]
+            try:
+                k = self._server.compressor.decompress(k)
+            except Exception:
+                # Handle little values, chosen to be not compressed
+                pass
+            k = self._server.serializer.loads(k)
+            try:
+                v = self._server.compressor.decompress(v)
+            except Exception:
+                pass
+            v = self._server.serializer.loads(v)
+            # items.append((Float.decode(score), elements[j + 1]))
+            items.append((k, v))
+        changed_items = 0
+
+        for item_key, item_val in items:
+            avl.insert(item_key, item_val)
+            changed_items += 1
+
+        if changed_items:
+            key.updated()
+
+        return changed_items
 
 
 setattr(FakeSocket, 'del', FakeSocket.del_)
